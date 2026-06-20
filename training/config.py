@@ -19,10 +19,9 @@ class PromptConfig:
 
 @dataclass
 class ModelConfig:
-    name: str = "unsloth/Qwen2.5-3B-Instruct"
+    name: str = "Qwen/Qwen2.5-3B-Instruct"
     max_seq_length: int = 1024
     load_in_4bit: bool = True
-    dtype: Optional[str] = None
 
 
 @dataclass
@@ -37,7 +36,7 @@ class LoRAConfig:
         ]
     )
     bias: str = "none"
-    use_gradient_checkpointing: str = "unsloth"
+    use_gradient_checkpointing: bool = True
 
 
 @dataclass

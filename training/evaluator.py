@@ -1,8 +1,7 @@
-import time
 from typing import Any, Dict, List
+import time
 
 import torch
-from unsloth import FastLanguageModel
 
 from training import DatasetLoader
 
@@ -39,7 +38,8 @@ class ModelEvaluator:
 
         Returns a dict with accuracy, correct count, timing, and per-example results.
         """
-        FastLanguageModel.for_inference(self.model)
+        self.model.eval()
+        self.model.config.use_cache = True
         correct = 0
         results: List[Dict[str, Any]] = []
         start = time.time()

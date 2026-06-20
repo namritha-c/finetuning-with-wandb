@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import wandb
 
@@ -54,7 +54,7 @@ class WandbLogger:
             name=run_name or self.config.run_name,
             group=group,
             job_type="training",
-            tags=["lora", "sql", "qwen2.5", "unsloth"],
+            tags=["lora", "sql", "qwen2.5"],
             reinit=True,
         )
         print(f"W&B run started — ID: {self._run.id}  "
@@ -100,7 +100,6 @@ class WandbLogger:
             "model_name": config.name,
             "model_max_seq_length": config.max_seq_length,
             "model_load_in_4bit": config.load_in_4bit,
-            "model_dtype": str(config.dtype),
         })
 
     def log_lora_config(self, config: LoRAConfig) -> None:
@@ -110,7 +109,6 @@ class WandbLogger:
             "lora_dropout": config.lora_dropout,
             "lora_target_modules": ",".join(config.target_modules),
             "lora_bias": config.bias,
-            "lora_use_gradient_checkpointing": config.use_gradient_checkpointing,
         })
 
     def log_training_config(self, config: TrainingConfig) -> None:
@@ -137,15 +135,6 @@ class WandbLogger:
     # ------------------------------------------------------------------
     # Metric logging
     # ------------------------------------------------------------------
-
-    def log_training_metrics(self, metrics: Dict[str, Any]) -> None:
-        """Log scalar summaries produced by trainer.train()."""
-        wandb.log({
-            "train/loss_final": metrics.get("train_loss", 0.0),
-            "train/runtime_seconds": metrics.get("train_runtime", 0.0),
-            "train/samples_per_second": metrics.get("train_samples_per_second", 0.0),
-            "train/steps_per_second": metrics.get("train_steps_per_second", 0.0),
-        })
 
     def log_evaluation_metrics(
         self,
@@ -340,7 +329,7 @@ class WandbLogger:
                     "base_model": model_loader.model_config.name,
                     "adapter_type": "lora",
                     "task": "text-to-sql",
-                    "framework": "unsloth+peft",
+                    "framework": "transformers+peft",
                 },
             )
             artifact.add_dir(tmp_dir)

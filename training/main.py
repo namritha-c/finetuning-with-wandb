@@ -123,13 +123,19 @@ def main() -> None:
     print(f"Training dataset ready: {len(train_dataset):,} examples")
 
     # ------------------------------------------------------------------
-    # 7. Train — WandbStepCallback streams metrics live to W&B
+    # 7. Train — HF WandbCallback streams metrics live to W&B automatically
     # ------------------------------------------------------------------
     print("\n--- Training ---")
-    lora_trainer = LoRATrainer(model_loader.model, tokenizer, training_config, model_config)
+    lora_trainer = LoRATrainer(
+        model_loader.model,
+        tokenizer,
+        training_config,
+        model_config,
+        lora_config,
+        wandb_config,
+        run_name=f"{run_group}_train",
+    )
     train_metrics = lora_trainer.train(train_dataset)
-
-    wandb_logger.log_training_metrics(train_metrics)
 
     # ------------------------------------------------------------------
     # 8. Training loss plot
