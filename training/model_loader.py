@@ -27,20 +27,15 @@ class ModelLoader:
                 bnb_4bit_compute_dtype=torch.bfloat16,
             )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_config.name,
-            trust_remote_code=True,
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_config.name,
             quantization_config=quantization_config,
             torch_dtype=torch.bfloat16 if not self.model_config.load_in_4bit else None,
             device_map="auto",
-            trust_remote_code=True,
         )
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_config.name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
         total = sum(p.numel() for p in self.model.parameters())
         print(f"Base model loaded: {self.model_config.name}")
@@ -50,12 +45,10 @@ class ModelLoader:
     def apply_lora(self, seed: int = 42) -> None:
         """Wrap the base model with PEFT LoRA adapters (in-place)."""
         if self.model_config.load_in_4bit:
-            self.model = prepare_model_for_kbit_training(
-                self.model,
-                use_gradient_checkpointing=self.lora_config.use_gradient_checkpointing,
-            )
+            self.model.gradient_checkpointing_enable()
+            self.model = prepare_model_for_kbit_training(self.model)
 
-        peft_config = LoraConfig(
+        lora_cfg = LoraConfig(
             r=self.lora_config.r,
             lora_alpha=self.lora_config.lora_alpha,
             lora_dropout=self.lora_config.lora_dropout,
@@ -63,11 +56,8 @@ class ModelLoader:
             bias=self.lora_config.bias,
             task_type="CAUSAL_LM",
         )
-        self.model = get_peft_model(self.model, peft_config)
-
-        total, trainable = self.get_parameter_counts()
+        self.model = get_peft_model(self.model, lora_cfg)
         print("LoRA adapters applied.")
-        print(f"  Trainable: {trainable:,} / {total:,} ({trainable / total * 100:.4f}%)")
 
     def get_parameter_counts(self) -> Tuple[int, int]:
         """Return (total_params, trainable_params) for the current model state."""
@@ -76,7 +66,7 @@ class ModelLoader:
         return total, trainable
 
     def set_inference_mode(self) -> None:
-        """Switch the model to inference mode (disables dropout, enables caching)."""
+        """Switch the model to inference mode (enables KV-cache, disables dropout)."""
         self.model.eval()
         self.model.config.use_cache = True
 

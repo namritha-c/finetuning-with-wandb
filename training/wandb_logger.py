@@ -1,15 +1,23 @@
 import os
-from typing import Any, Dict, Optional
+import shutil
+import time
+import traceback
+from typing import Any, Dict, List, Optional
 
 import wandb
 
 from .config import DataConfig, LoRAConfig, ModelConfig, PromptConfig, TrainingConfig, WandbConfig
+from .model_loader import ModelLoader
 
 
 class WandbLogger:
     """
-    Centralises all Weights & Biases interactions: run lifecycle, config logging,
-    metric streaming, artifact uploads, dataset tracking, and model versioning.
+    Centralises all W&B interactions: run lifecycle, config/metric logging,
+    artifact uploads, dataset tracking, and model versioning.
+
+    Training step metrics are handled automatically by HuggingFace's
+    WandbCallback (report_to="wandb"). This class manages the run lifecycle,
+    config logging, post-training artifacts, and evaluation runs.
     """
 
     def __init__(self, config: WandbConfig) -> None:
@@ -18,17 +26,11 @@ class WandbLogger:
         self._configure_auth()
 
     def _configure_auth(self) -> None:
-        """
-        Push W&B credentials and server URL into os.environ so the W&B client
-        connects to the correct instance. Credentials stored by `wandb login`
-        in ~/.netrc are used automatically when api_key is not set here.
-        base_url is only applied when explicitly set (self-hosted server);
-        when None the W&B client defaults to https://api.wandb.ai (cloud).
-        """
         if self.config.api_key:
             os.environ.setdefault("WANDB_API_KEY", self.config.api_key)
         if self.config.base_url:
             os.environ.setdefault("WANDB_BASE_URL", self.config.base_url)
+        os.environ["WANDB_PROJECT"] = self.config.project
         server = self.config.base_url or "https://api.wandb.ai (cloud)"
         print(f"W&B configured — server: {server}")
 
@@ -38,53 +40,35 @@ class WandbLogger:
 
     @property
     def run_id(self) -> Optional[str]:
-        """Return the active run ID, or None if no run is open."""
         return self._run.id if self._run else None
 
-    def start_run(self, run_name: Optional[str] = None, group: Optional[str] = None) -> None:
-        """
-        Begin a new W&B training run.
-
-        Both the training and eval runs receive the same group name so they
-        are displayed together under one group in the W&B UI.
-        """
+    def start_run(self) -> None:
+        run_name = f"{self.config.run_name}_{int(time.time())}"
         self._run = wandb.init(
             project=self.config.project,
             entity=self.config.entity,
-            name=run_name or self.config.run_name,
-            group=group,
+            name=run_name,
             job_type="training",
             tags=["lora", "sql", "qwen2.5"],
+            notes=self.config.description,
             reinit=True,
         )
-        print(f"W&B run started — ID: {self._run.id}  "
-              f"URL: {self._run.get_url()}")
+        print(f"W&B run started — ID: {self._run.id}  URL: {self._run.get_url()}")
 
-    def start_eval_run(
-        self,
-        training_run_id: str,
-        group: Optional[str] = None,
-        run_name: Optional[str] = None,
-    ) -> None:
-        """
-        Open a separate evaluation run in the same W&B project, linked to the
-        training run via group membership and a config entry.
-        """
+    def start_eval_run(self, training_run_id: str, run_name: Optional[str] = None) -> None:
+        name = run_name or f"eval_{training_run_id[:8]}"
         self._run = wandb.init(
             project=self.config.project,
             entity=self.config.entity,
-            name=run_name or f"eval_{training_run_id}",
-            group=group,
+            name=name,
             job_type="evaluation",
             tags=["evaluation", "lora", "sql"],
             config={"training_run_id": training_run_id},
             reinit=True,
         )
-        print(f"W&B eval run started — ID: {self._run.id}  "
-              f"URL: {self._run.get_url()}")
+        print(f"W&B eval run started — ID: {self._run.id}  URL: {self._run.get_url()}")
 
-    def finish_run(self) -> None:
-        """Finalise the current run and print a direct link to the W&B UI."""
+    def end_run(self) -> None:
         if self._run:
             url = self._run.get_url()
             self._run.finish()
@@ -92,7 +76,7 @@ class WandbLogger:
             self._run = None
 
     # ------------------------------------------------------------------
-    # Config / hyperparameter logging
+    # Config / parameter logging
     # ------------------------------------------------------------------
 
     def log_model_config(self, config: ModelConfig) -> None:
@@ -136,6 +120,14 @@ class WandbLogger:
     # Metric logging
     # ------------------------------------------------------------------
 
+    def log_training_metrics(self, metrics: Dict[str, Any]) -> None:
+        wandb.log({
+            "train/loss_final": metrics.get("train_loss", 0.0),
+            "train/runtime_seconds": metrics.get("train_runtime", 0.0),
+            "train/samples_per_second": metrics.get("train_samples_per_second", 0.0),
+            "train/steps_per_second": metrics.get("train_steps_per_second", 0.0),
+        })
+
     def log_evaluation_metrics(
         self,
         base_eval: Dict[str, Any],
@@ -157,16 +149,10 @@ class WandbLogger:
         })
 
     # ------------------------------------------------------------------
-    # Artifact / file logging
+    # Artifact logging
     # ------------------------------------------------------------------
 
-    def log_artifact_file(self, local_path: str, artifact_subdir: str = "plots") -> None:
-        """
-        Upload a local file to the current run.
-
-        PNG/JPG images are also sent as rich media panels (wandb.Image) so they
-        appear in the W&B Media tab in addition to the Artifacts tab.
-        """
+    def log_artifact(self, local_path: str, artifact_subdir: str = "") -> None:
         if not os.path.exists(local_path):
             print(f"Warning: artifact not found, skipping: {local_path}")
             return
@@ -179,7 +165,7 @@ class WandbLogger:
 
         artifact = wandb.Artifact(
             name=filename.replace(".", "_"),
-            type=artifact_subdir,
+            type=artifact_subdir or "file",
         )
         artifact.add_file(local_path)
         self._run.log_artifact(artifact)
@@ -188,33 +174,18 @@ class WandbLogger:
     # Prompt versioning
     # ------------------------------------------------------------------
 
-    def log_prompt_artifact(self, prompt_config: PromptConfig) -> None:
-        """
-        Version the system prompt in W&B as a prompt artifact.
-
-        Each call creates a new artifact version so prompt changes are tracked
-        over time, similar to MLflow's Prompt Registry.
-        """
+    def register_system_prompt(self, prompt_config: PromptConfig) -> None:
         artifact = wandb.Artifact(
             name=self.config.prompt_artifact_name,
             type="prompt",
             description=prompt_config.commit_message,
-            metadata={"commit_message": prompt_config.commit_message},
         )
         with artifact.new_file("system_prompt.txt", mode="w") as fh:
             fh.write(prompt_config.text)
         self._run.log_artifact(artifact, aliases=["latest"])
         print(f"System prompt logged as W&B artifact: '{self.config.prompt_artifact_name}'")
 
-    def load_system_prompt(self, fallback_text: str) -> str:
-        """
-        Load the latest system prompt from W&B artifacts.
-
-        On the very first run the artifact does not exist yet, so this falls
-        back to fallback_text (i.e. PromptConfig.text) and prints a notice.
-        On all subsequent runs the versioned prompt from W&B is used, allowing
-        prompt edits to be made via the W&B UI without touching source code.
-        """
+    def load_system_prompt_from_registry(self, prompt_config: PromptConfig) -> str:
         try:
             entity = self.config.entity or self._run.entity
             artifact_path = (
@@ -227,34 +198,18 @@ class WandbLogger:
             prompt_file = os.path.join(artifact_dir, "system_prompt.txt")
             with open(prompt_file) as fh:
                 text = fh.read().strip()
-            print(
-                f"System prompt loaded from W&B artifact: "
-                f"'{self.config.prompt_artifact_name}:latest' (v{artifact.version})"
-            )
+            print(f"System prompt loaded from W&B artifact: "
+                  f"'{self.config.prompt_artifact_name}:latest' (v{artifact.version})")
             return text
         except Exception as exc:
-            print(
-                f"Could not load prompt from W&B ({exc}). "
-                f"Using PromptConfig default."
-            )
-            return fallback_text
+            print(f"Could not load prompt from W&B ({exc}). Using PromptConfig default.")
+            return prompt_config.text
 
     # ------------------------------------------------------------------
     # Dataset logging
     # ------------------------------------------------------------------
 
-    def log_dataset(
-        self,
-        train_data,
-        test_data,
-        data_config: DataConfig,
-    ) -> None:
-        """
-        Log train and test splits as a versioned W&B dataset artifact.
-
-        A wandb.Table of up to 10 sample rows is embedded so the data is
-        immediately previewable in the W&B Artifacts UI without downloading.
-        """
+    def log_dataset(self, train_data, test_data, data_config: DataConfig) -> None:
         artifact = wandb.Artifact(
             name=self.config.dataset_artifact_name,
             type="dataset",
@@ -263,12 +218,9 @@ class WandbLogger:
                 "source": data_config.dataset_name,
                 "train_size": len(train_data),
                 "test_size": len(test_data),
-                "num_train_requested": data_config.num_train,
-                "num_test_requested": data_config.num_test,
                 "seed": data_config.seed,
             },
         )
-
         sample_table = wandb.Table(columns=["question", "context", "answer"])
         for i in range(min(10, len(train_data))):
             sample_table.add_data(
@@ -277,50 +229,22 @@ class WandbLogger:
                 train_data[i]["answer"],
             )
         artifact.add(sample_table, "train_samples")
-
         self._run.log_artifact(artifact)
-        print(
-            f"Dataset logged as W&B artifact '{self.config.dataset_artifact_name}': "
-            f"{len(train_data):,} train / {len(test_data):,} test."
-        )
+        print(f"Dataset logged as W&B artifact '{self.config.dataset_artifact_name}': "
+              f"{len(train_data):,} train / {len(test_data):,} test.")
 
     # ------------------------------------------------------------------
     # Model logging
     # ------------------------------------------------------------------
 
-    def log_final_model(
-        self,
-        model_loader,
-        tokenizer,
-        tmp_dir: str = "/tmp/lora_adapter",
-    ) -> None:
-        """
-        Save the LoRA adapter weights locally, upload them as a versioned W&B
-        model artifact, and block until the upload is confirmed complete.
-
-        Calling .wait() on the returned artifact handle ensures the upload
-        finishes before finish_run() is called — without it the run can close
-        while the artifact is still queued, causing it to appear missing.
-        """
-        import shutil
-        import traceback
-
-        # Always start from a clean temp directory so stale files from a
-        # previous run cannot pollute the artifact.
+    def log_final_model(self, model_loader: ModelLoader, tokenizer) -> None:
+        tmp_dir = "/tmp/lora_adapter"
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
         os.makedirs(tmp_dir, exist_ok=True)
 
         try:
             model_loader.save_adapter(tmp_dir)
-
-            saved_files = os.listdir(tmp_dir)
-            if not saved_files:
-                raise RuntimeError(
-                    f"save_adapter() produced no files in {tmp_dir}."
-                )
-            print(f"Adapter files saved: {saved_files}")
-
             artifact = wandb.Artifact(
                 name=self.config.model_artifact_name,
                 type="model",
@@ -334,13 +258,13 @@ class WandbLogger:
             )
             artifact.add_dir(tmp_dir)
             logged = self._run.log_artifact(artifact)
-            # Block until W&B confirms the upload is complete so that a
-            # subsequent finish_run() does not close the run prematurely.
             logged.wait()
-            print(
-                f"Final model logged as W&B artifact "
-                f"'{self.config.model_artifact_name}' (v{logged.version})."
-            )
+            print(f"Model logged as W&B artifact '{self.config.model_artifact_name}'.")
         except Exception as exc:
             print(f"ERROR: could not log model artifact to W&B — {exc}")
             traceback.print_exc()
+
+    def log_step_losses(self, log_history: List[Dict[str, Any]]) -> None:
+        for entry in log_history:
+            if "loss" in entry:
+                wandb.log({"step_train_loss": entry["loss"]}, step=entry["step"])

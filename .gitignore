@@ -29,6 +29,7 @@ lora_sql_checkpoints/
 
 # Generated plots (saved under outputs/plots/)
 outputs/
+artifacts/
 
 # W&B local cache and offline runs
 wandb/

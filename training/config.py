@@ -19,7 +19,7 @@ class PromptConfig:
 
 @dataclass
 class ModelConfig:
-    name: str = "Qwen/Qwen2.5-3B-Instruct"
+    name: str = "Qwen/Qwen2.5-0.5B-Instruct"
     max_seq_length: int = 1024
     load_in_4bit: bool = True
 
@@ -36,14 +36,14 @@ class LoRAConfig:
         ]
     )
     bias: str = "none"
-    use_gradient_checkpointing: bool = True
 
 
 @dataclass
 class DataConfig:
     dataset_name: str = "b-mc2/sql-create-context"
-    num_train: int = 5000
-    num_test: int = 500
+    target_column: str = "answer"
+    num_train: int = 500
+    num_test: int = 50
     seed: int = 42
 
 
@@ -67,20 +67,20 @@ class TrainingConfig:
 
 @dataclass
 class WandbConfig:
-    # Set only when using a self-hosted W&B server (wandb/local).
-    # Leave as None (or omit WANDB_BASE_URL from .env) to use wandb.ai cloud.
     base_url: Optional[str] = field(
         default_factory=lambda: os.getenv("WANDB_BASE_URL")
     )
-    # Not required when credentials are stored via `wandb login` (~/.netrc).
     api_key: Optional[str] = field(
         default_factory=lambda: os.getenv("WANDB_API_KEY")
     )
     entity: Optional[str] = field(
         default_factory=lambda: os.getenv("WANDB_ENTITY")
     )
-    project: str = "LoRA_SQL_Finetuning"
-    run_name: Optional[str] = None
+
+    project: str = "SQL_Finetuning_HF"
+    description: str = "Fine tuning qwen model for SQL query prediction (HF report_to=wandb)."
+    run_name: Optional[str] = "sql_finetuning"
+
     prompt_artifact_name: str = "sql-assistant-system-prompt"
-    model_artifact_name: str = "lora-sql-model"
+    model_artifact_name: str = "sql-model"
     dataset_artifact_name: str = "sql-create-context"
